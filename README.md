@@ -5,7 +5,7 @@
 ```python
 from pyjsparser import parse
 from interpreter import JSInterpreter
-from environment import init_globalEnv, ExecutionContext, Environment
+from environment import init_globalEnv
 
 ctx = init_globalEnv(
     domain='https://www.example.com',
