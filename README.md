@@ -48,7 +48,7 @@ var uint8 = Uint8Array(30)
 uint[0] = 124
 
 console.log(typeof uint8) // <class 'window.CreateArrayOfBytes'>
-console.log(uint.length) // 30
+console.log(uint8.length) // 30
 """
 
 interpreter = JSInterpreter(code, exec_ctx=ctx)
