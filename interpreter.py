@@ -1,21 +1,42 @@
-import re
 import sys
 import types
-from pyjsparser import parse
+import esprima
+from js_properties import Prototype
 from environment import init_globalEnv, ExecutionContext, Environment
 
 userfunc_tostring = {}
 
-import ctypes
-
-kernel32 = ctypes.windll.kernel32
-handle = kernel32.GetStdHandle(-11)  # STD_OUTPUT_HANDLE = -11
-mode = ctypes.c_ulong()
-kernel32.GetConsoleMode(handle, ctypes.byref(mode))
-kernel32.SetConsoleMode(handle, mode.value | 0x0004)
 
 def unsigned_right_shift(x, n):
     return (x & 0xFFFFFFFF) >> n
+
+def signed_32bit2(left, right):
+    v = (left << right) & 0xFFFFFFFF
+    if v & 0x80000000:
+        v -= 0x100000000
+    return v
+
+def bitwise_left_shift(val, shift):
+    val = val & 0xFFFFFFFF
+    val = (val << shift) & 0xFFFFFFFF
+    if val >= 0x80000000:
+        val -= 0x100000000
+    return val
+
+def xor_32(left, right):
+    a_32 = left & 0xFFFFFFFF
+    b_32 = right & 0xFFFFFFFF
+    v = (a_32 ^ b_32) & 0xFFFFFFFF
+    if v & 0x80000000:
+        v -= 0x100000000
+    return v
+
+
+def signed_right_shift(val, shift):
+    val = val & 0xFFFFFFFF
+    if val & 0x80000000:
+        val = val - 0x100000000
+    return val >> shift
 
 def js_in_operator(left, right):
     if isinstance(right, dict):
@@ -28,6 +49,66 @@ def js_in_operator(left, right):
         return 0 <= index < len(right)
     else:
         raise TypeError(f"Cannot use 'in' operator with {type(right)}")
+    
+def ast_to_dict(node):
+    if isinstance(node, list):
+        return [ast_to_dict(n) for n in node]
+    elif hasattr(node, '__dict__'):
+        return {key: ast_to_dict(value) for key, value in node.__dict__.items()}
+    else:
+        return node
+    
+Function = {
+    'bind': lambda fn, this_arg: lambda *args: lambda *more_args: fn(this_arg, *(args + more_args)),
+    'call': lambda fn, this_arg, *args: fn(this_arg, *args),
+    'apply': lambda fn, this_arg, arg_list: fn(this_arg, *arg_list),
+    'toString': lambda fn: 'function() { [native code] }'
+}
+
+class JSFunction:
+    __name__ = 'JSFunction'
+    def __init__(self, constructor_func, new_target=False):
+        self.func = constructor_func
+        self.props = {}
+        self.prototype = {'constructor': self}
+        self.prototype.update(Function)
+        self.new_target = new_target
+
+    def instantiate(self, *args):
+        instance = {}
+        self.constructor_func(*args, new_target=True, this=instance)
+        for name, method in self.prototype.items():
+            if callable(method):
+                instance[name] = method.__get__(instance)
+            else:
+                instance[name] = method
+        return instance
+    
+    def __call__(self, *args, new_target=None, this=None):
+        if new_target:
+            this =self.prototype
+        if isinstance(self.func, types.LambdaType):
+            return self.func(*args, this=this)
+        return self.func(*args, new_target=new_target, this=this)
+    
+    def __getitem__(self, key):
+        if key == 'prototype':
+            return self.prototype
+        if key in self.props:
+            return self.props[key]
+        if key in self.prototype:
+            prop = self.prototype[key]
+            
+            if callable(prop):
+                return lambda *args, **kwargs: prop(self.func, *args, **kwargs)
+            return prop
+        raise KeyError('Unknown property:', key)
+
+    def __setitem__(self, key, value):
+        if key == 'prototype':
+            self.prototype = value
+        else:
+            self.props[key] = value
 
 class JSInterpreter:
     def __init__(self, code, exec_ctx):
@@ -53,52 +134,60 @@ class JSInterpreter:
             return result
         
         if node['type'] == 'FunctionDeclaration':
-            this = self
+            self_ref = self
             parent_env = ctx.env
-            
+            is_new_target = False
+
             def func(*args, new_target=None, this=None):
+                nonlocal is_new_target
+                
                 activation_record = {}
-                
                 for i in range(len(node['params'])):
-                    
-                    activation_record[node['params'][i]['name']] = list(args)[i]
-                
-                activation_record['arguments'] = [arg for arg in list(args)]
-                
+                    param_name = node['params'][i]['name']
+                    activation_record[param_name] = args[i] if i < len(args) else None
+
+                activation_record['arguments'] = list(args)
+
                 if new_target:
+                    is_new_target = True
+                    this = this or {}
+                    for stmt in node['body']['body']:
+                        result = self_ref.constructor_props(stmt, ctx)
+                        if result:
+                            this.update(result)
+                            
+                if this is None:
                     this = {}
                     
-                    for stmt in node['body']['body']:
-                        sresult = self.constructor_props(stmt, ctx)
-                        this.update(sresult)
-                
+                    
+                this['constructor'] = func
+
                 env_inner = Environment(activation_record, parent_env)
-                exec_ctx = ExecutionContext(
-                    this,
-                    env_inner
-                )
-                
-                self.call_stack.append(exec_ctx)
-                
+                exec_ctx = ExecutionContext(this, env_inner)
+                self_ref.call_stack.append(exec_ctx)
+
+                result = self_ref.eval_function_block(node['body'], exec_ctx)
+
                 if new_target:
-                    self.eval_function_block(node['body'], exec_ctx)
                     return this
-                
-                result = self.eval_function_block(node['body'], exec_ctx)
                 return result
             
+            func = JSFunction(func, is_new_target)
+
             ctx.env.define(node['id']['name'], func)
+            ctx.env.define(f"{node['id']['name']}__class", func)
             return
         
         if node['type'] == 'NewExpression':
             callee = self.evaluate(node['callee'], ctx)
             
             args = [self.evaluate(arg, ctx) for arg in node['arguments']]
-            
-            if not isinstance(callee, types.FunctionType):
-                result = callee(*args)
-            else:
+            if isinstance(callee, JSFunction) and hasattr(callee, '__name__'):
                 result = callee(*args, new_target=True)
+            if callee.__name__ == 'func':
+                result = callee(*args, new_target=True)
+            else:
+                result = callee(*args)
             return result
         
         if node['type'] == 'ContinueStatement':
@@ -131,43 +220,39 @@ class JSInterpreter:
                 name = node['id']['name']
             else:
                 name = None
-                
+
             this = self
             parent_env = ctx.env
-            
+            is_new_target = False
+
             def func(*args, new_target=None, this={}):
+                nonlocal is_new_target
                 activation_record = {}
                 
+                if new_target:
+                    is_new_target = True
+
                 if name:
                     activation_record[name] = func
-                
+
                 for i in range(len(node['params'])):
-                    activation_record[node['params'][i]['name']] = list(args[i])
+                    param = node['params'][i]['name']
+                    activation_record[param] = args[i] if i < len(args) else None
+
+                activation_record['arguments'] = list(args)
                 
-                activation_record['arguments'] = [arg for arg in list(args)]
-                
-                if new_target:
-                    for stmt in node['body']['body']:
-                        sresult = self.constructor_props(stmt, ctx)
-                        this.update(sresult)
-                
+                this = this or {}
+                this['constructor'] = func
+
                 env_inner = Environment(activation_record, parent_env)
-                exec_ctx = ExecutionContext(
-                    this,
-                    env_inner
-                )
-                
+                exec_ctx = ExecutionContext(this or {}, env_inner)
                 self.call_stack.append(exec_ctx)
-                
-                if new_target is not None:
-                    self.eval_function_block(node['body'], exec_ctx)
-                    return this
                 
                 result = self.eval_function_block(node['body'], exec_ctx)
                 return result
             
-            #func_string = self.scriptCode[int(node['loc']['start']['column']):int(node['loc']['end']['column'])]
-            #userfunc_tostring[func] = func_string
+            func = JSFunction(func, is_new_target)
+            func['call'] = lambda this, *args: func(*args, this=this)
             return func
         
         if node['type'] == 'ReturnStatement':
@@ -183,11 +268,17 @@ class JSInterpreter:
             return self.evaluate(node['expression'])
         
         if node['type'] == 'Literal' and 'value' in node:
+            if 'regex' in node:
+                pattern = node['regex']['pattern']
+                flags = node['regex']['flags']
+                return ctx.selfValue['RegExp'](pattern, flags)
             return node['value']
         
         if node['type'] == 'UnaryExpression':
-            argument = self.evaluate(node['argument'])
-            
+            argument, prop = self.resolve_unary_expression(node['argument'], ctx)
+            if not argument:
+                argument = self.evaluate(node['argument'])
+
             if node['operator'] == '!':
                 return not argument
             elif node['operator'] == '-':
@@ -200,6 +291,9 @@ class JSInterpreter:
                 return type(argument)
             elif node['operator'] == 'void':
                 return None
+            elif node['operator'] == 'delete':
+                del argument[prop]
+                return
             else:
                 raise TypeError('unknown unary operator:', node['operator'])
                 
@@ -224,9 +318,19 @@ class JSInterpreter:
                 left = int(left)
             if isinstance(right, float):
                 right = int(right)
+                
+            if isinstance(right, types.LambdaType):
+                right = right()
+            if isinstance(left, types.LambdaType):
+                left = left()
+                
+            if left == None and isinstance(right, int):
+                return False
             
             if node['operator'] == '+':
                 return left + right
+            elif node['operator'] == '-':
+                return left - right
             elif node['operator'] == '*':
                 return left * right
             elif node['operator'] == '/':
@@ -256,15 +360,15 @@ class JSInterpreter:
             elif node['operator'] == '&':
                 return left & right
             elif node['operator'] == '^':
-                return left ^ right
+                return xor_32(left, right)
             elif node['operator'] == '<<':
-                return left << right
+                return signed_32bit2(left, right)
             elif node['operator'] == '>>':
                 return left >> right
             elif node['operator'] == '>>':
                 return left >> right
-            elif node['operator'] == '>>>':
-                return unsigned_right_shift(left, right)
+            #elif node['operator'] == '>>>':
+            #    return unsigned_right_shift(left, right)
             elif node['operator'] == 'in':
                 return js_in_operator(left, right)
             elif node['operator'] == 'instanceof':
@@ -310,42 +414,40 @@ class JSInterpreter:
                 elif node['operator'] == '/=':
                     return ctx.env.assign(left, prevValue / right)
                 elif node['operator'] == '^=':
-                    return ctx.env.assign(left, prevValue ^ right)
+                    return ctx.env.assign(left, xor_32(prevValue, right))
                 elif node['operator'] == '&=':
                     return ctx.env.assign(left, prevValue & right)
                 elif node['operator'] == '|=':
                     return ctx.env.assign(left, prevValue | right)
+                elif node['operator'] == '<<=':
+                    return ctx.env.assign(left, bitwise_left_shift(prevValue, right))
+                elif node['operator'] == '>>=':
+                    return ctx.env.assign(left, signed_right_shift(prevValue, right))
                 elif node['operator'] == '%=':
                     return ctx.env.assign(left, prevValue % right)
                 else:
                     raise TypeError('Unknown operator assignment:', node['operator'])
                 
             if node['left']['type'] == 'MemberExpression':
-                obj_name = node['left']['object'].get('name', None)
-                obj = None
-                
-                if obj_name is None:
-                    obj = self.evaluate(node['left']['object'], ctx)
-                else:
-                    obj = ctx.env.lookup(obj_name)
-                
-                if not obj and obj != {}:
-                    raise TypeError('Undefined object in assignment...', node)
-                
-                prop = None
-                
-                if node['left']['computed']:
-                    prop = self.evaluate(node['left']['property'], ctx)
-                else:
-                    prop = node['left']['property']['name']
-                
-                if prop is None:
-                    raise TypeError('Undefined property in assignment...', node)
-                if prop not in obj:
-                    return 'XD1'
-                
+                obj, prop = self.resolve_member_target(node['left'], ctx)
                 prop_value = self.evaluate(node['right'], ctx)
-                prev_value = obj[prop]
+                
+                if obj is None:
+                    pass
+                
+                obj = Prototype.object_properties2(obj)
+
+                operator = node['operator']
+                if operator == '=':
+                    if isinstance(prop, list):
+                        prop = ''
+                    #print('LOOK', obj, prop, prop_value, type(prop))
+                    obj[prop] = prop_value
+                    return obj[prop]
+                
+                prev_value = obj.get(prop, None)
+                if prev_value is None:
+                    raise TypeError(f"Property '{prop}' not found in object")
                 
                 if node['operator'] == '=':
                     obj[prop] = prop_value
@@ -353,6 +455,8 @@ class JSInterpreter:
                 elif node['operator'] == '+=':
                     obj[prop] = prev_value + prop_value
                     return obj[prop]
+                elif node['operator'] == '<<=':
+                    return bitwise_left_shift(left, right)
                 elif node['operator'] == '-=':
                     obj[prop] = prev_value - prop_value
                     return obj[prop]
@@ -363,7 +467,7 @@ class JSInterpreter:
                     obj[prop] = prev_value / prop_value
                     return obj[prop]
                 elif node['operator'] == '^=':
-                    return ctx.env.assign(left, prev_value ^ prop_value)
+                    return ctx.env.assign(left, xor_32(prev_value, prop_value))
                 else:
                     raise TypeError('Unknown operator assignment:', node['operator'])
             raise TypeError('Unknown assignment for node type:', node['left']['type'])
@@ -416,9 +520,8 @@ class JSInterpreter:
         
         if node['type'] == 'ObjectExpression':
             obj = {}
-            
             for prop in node['properties']:
-                key = prop['key']['name'] or prop['key']['value']
+                key = prop['key'].get('name', None) or prop['key']['value']
                 value = self.evaluate(prop['value'], ctx)
                 
                 obj[key] = value
@@ -469,36 +572,67 @@ class JSInterpreter:
         
         if node['type'] == 'CallExpression':
             selfCtx = None
-            fn = self.evaluate(node['callee'], ctx)
+            callee_node = node['callee']
             
-            if node['callee']['type'] == 'MemberExpression':
-                selfCtx = self.evaluate(node['callee']['object'], ctx)
+            if callee_node['type'] == 'MemberExpression':
+                selfCtx = self.evaluate(callee_node['object'], ctx)
                 
-                if node['callee']['computed']:
-                    prop = self.evaluate(node['callee']['property'], ctx)
+                if callee_node['computed']:
+                    prop = self.evaluate(callee_node['property'], ctx)
                 else:
-                    prop = node['callee']['property']['name']
-                fn = selfCtx[prop]
-            else:
-                fn = self.evaluate(node['callee'], ctx)
-                selfCtx = ctx.selfValue
+                    prop = callee_node['property']['name']
                 
-            if not fn:
-                raise TypeError('function is not defined', node)                
+                fn = self.evaluate(callee_node, ctx)
+            else:
+                fn = self.evaluate(callee_node, ctx)
+                selfCtx = ctx.selfValue or None
+
+            if not callable(fn):
+                if fn is None:
+                    print('function is not callable', fn, node)
+                    return None
+                raise TypeError('function is not callable', fn, node)
             
             args = [self.evaluate(arg, ctx) for arg in node['arguments']]
-            
-            return fn(*args)
+
+            if hasattr(fn, '__call__') and hasattr(fn, '__code__'):
+                return fn(*args)
+            elif isinstance(fn, JSFunction):
+                return fn(*args, this=selfCtx)
+            else:
+                if fn == eval and args[0] is None:
+                    return None
+                return fn(*args)
         
         if node['type'] == 'MemberExpression':
             obj = self.evaluate(node['object'], ctx)
-            prop = None
             
             if node['computed']:
                 prop = self.evaluate(node['property'], ctx)
             else:
                 prop = node['property']['name']
-            return obj[prop]
+                
+            if isinstance(obj, (dict, list, str)):
+                obj, js_prop = Prototype.object_properties(obj, prop)
+            else:
+                js_prop = prop
+            #print('MIRR', obj, js_prop, prop, type(obj))
+            try:
+                #print(js_prop in ctx.selfValue)
+                if isinstance(obj, dict):
+                    return obj.get(js_prop, None)
+                else:
+                    return obj[js_prop]
+            except TypeError:
+                return None
+            #if prop in obj:
+            #    return obj[prop]
+            #elif obj is not None:
+            #    return obj[prop]
+            #elif '__proto__' in obj and not isinstance(obj, dict): # javascript,proxy.Proxy
+            #    obj = obj['__proto__']
+            
+            #raise TypeError('Property not found in chain', prop, 'OBJ: ',obj)
         
         if node['type'] == 'WhileStatement':
             test = node['body']
@@ -593,7 +727,7 @@ class JSInterpreter:
         if node['type'] == 'EmptyStatement':
             return
         
-        raise TypeError('DJKCwegijgew')
+        raise TypeError('Unknown Node Instruction:', node)
     
     def hoistVariables(self, block, ctx):
         for stmt in block['body']:
@@ -626,7 +760,44 @@ class JSInterpreter:
                     self.flags['break'] == False
                 return result
         return result
+    
+    def resolve_member_target(self, node, ctx):
+        obj_name = node['object'].get('name', None)
         
+        if node['type'] != 'MemberExpression':
+            raise TypeError("Expected MemberExpression")
+
+        if node['object']['type'] == 'MemberExpression':
+            parent_obj, parent_prop = self.resolve_member_target(node['object'], ctx)
+            obj = parent_obj[parent_prop]
+        else:
+            obj = self.evaluate(node['object'], ctx)
+            
+        if obj_name is None and obj is None:
+            oe = self.evaluate(node['object'], ctx)
+
+        if node['computed']:
+            prop = self.evaluate(node['property'], ctx)
+        else:
+            prop = node['property']['name']
+            
+        return obj, prop
+    
+    def resolve_unary_expression(self, node, ctx):
+        if node['type'] == 'MemberExpression':
+            if node['computed'] and 'object' in node and 'property' in node:
+                obj_name = node['object']['name']
+                prop = node['property']['name']
+                obj = ctx.env.lookup(obj_name)
+                prop_value = ctx.env.lookup(prop)
+                return obj, prop_value
+        return False, None
+    
+    def is_constructor_func(self, node):
+        for body in node['body']:
+            print(body)
+            
+        sys.exit()
      
     def eval_function_block(self, block, ctx):
         self.hoistVariables(block, ctx)
@@ -642,13 +813,23 @@ class JSInterpreter:
         
         self.call_stack.pop()
         return result
+    
+    @staticmethod
+    def parse_code(code):
+        sys.setrecursionlimit(5000)
+        return ast_to_dict(esprima.parseScript(code))
 
 if __name__ == '__main__':
-    code = open('test2.js', 'r').read()
+    sys.setrecursionlimit(5000)
+    code = open('tests/test13.js', 'r').read()
     
     ctx = init_globalEnv(
-        domain='https://www.example.com',
-        user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36'
+        domain='https://nopecha.com/demo/cloudflare',
+        user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36',
+        html=open('tests/html_test.html', 'r').read()
     )
     interpreter = JSInterpreter(code, exec_ctx=ctx)
-    result = interpreter.evaluate(parse(code))
+    interpreter.evaluate(interpreter.parse_code(code))
+    result = interpreter.evaluate(interpreter.parse_code('show()'))
+    
+    print('Result', result)

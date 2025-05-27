@@ -1,7 +1,7 @@
 
 #from sandbox.dom import Sandbox
 import sys
-from sandbox.dom import Sandbox
+from window import Window
 
 class ExecutionContext:
     def __init__(self, selfValue, env):
@@ -34,7 +34,7 @@ class Environment:
         return value
     
 def init_globalEnv(**kwargs):
-    sandbox = Sandbox(**kwargs)
-    globalenv = Environment(sandbox.window)
-    globalexec = ExecutionContext(sandbox.window, globalenv)
+    sandbox = Window(**kwargs)
+    globalenv = Environment(sandbox.env)
+    globalexec = ExecutionContext(sandbox.env, globalenv)
     return globalexec
