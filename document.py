@@ -43,7 +43,6 @@ class Location:
         self.hostName = domain.split('/')[2] if len(domain.split('/')) > 3 else domain
         self.href = ''
         self.origin = 'https://' + domain.split('/')[2] if len(domain.split('/')) > 3 else domain
-        print(domain)
         self.pathname = domain.split('//')[1].split('/', 1)[1]
         
         if domain.count(':') == 2:

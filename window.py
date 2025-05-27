@@ -16,7 +16,6 @@ import urllib.parse
 import quickjs
 from uaparser import UAParser
 from base64 import b64encode, b64decode
-from py_mini_racer import py_mini_racer
 from document import Document, Event, MouseEvent
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
@@ -410,7 +409,7 @@ class JSPropertyFunc:
         self.func(*args, **kwds)
         
     def bind(self):
-        print('HELLO')
+        pass
     
 
 class DOMStringList:

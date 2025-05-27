@@ -1,0 +1,6 @@
+cryptography==45.0.2
+esprima==4.0.1
+numpy==2.2.4
+quickjs==1.19.4
+bs4==0.0.2
+ua-parser-py==1.0.37

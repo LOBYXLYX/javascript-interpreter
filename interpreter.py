@@ -793,12 +793,6 @@ class JSInterpreter:
                 return obj, prop_value
         return False, None
     
-    def is_constructor_func(self, node):
-        for body in node['body']:
-            print(body)
-            
-        sys.exit()
-     
     def eval_function_block(self, block, ctx):
         self.hoistVariables(block, ctx)
         result = None
@@ -821,7 +815,7 @@ class JSInterpreter:
 
 if __name__ == '__main__':
     sys.setrecursionlimit(5000)
-    code = open('tests/test13.js', 'r').read()
+    code = open('tests/test4.js', 'r').read()
     
     ctx = init_globalEnv(
         domain='https://nopecha.com/demo/cloudflare',
