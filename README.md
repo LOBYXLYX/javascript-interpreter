@@ -35,7 +35,7 @@ console.log(array);
 """
 
 interpreter = JSInterpreter(code, exec_ctx=ctx)
-result = interpreter.evaluate(interpreter.parse_code(code))
+interpreter.evaluate(interpreter.parse_code(code))
 # [0,10,20,30,40,50,60,70,80,90,100,110,120,130,140,150,160,170,180,190,200,210,220,230,240,250,260,270,280,290,300,310]
 ```
 
@@ -44,26 +44,26 @@ result = interpreter.evaluate(interpreter.parse_code(code))
 # ...
 
 code = """
-var uint8 = Uint8Array(30)
-uint[0] = 124
+var uint8 = new Uint8Array(30);
+uint[0] = 124;
 
-console.log(typeof uint8) // <class 'window.CreateArrayOfBytes'>
-console.log(uint8.length) // 30
+console.log(typeof uint8); // <class 'window.CreateArrayOfBytes'>
+console.log(uint8.length); // 30
 """
 
 interpreter = JSInterpreter(code, exec_ctx=ctx)
-result = interpreter.evaluate(interpreter.parse_code(code))
+interpreter.evaluate(interpreter.parse_code(code))
 ```
 
 ```python
 # ...
 
 code = """
-console.log(Object.getOwnPropertyNames(window))
+console.log(Object.getOwnPropertyNames(window));
 """
 
 interpreter = JSInterpreter(code, exec_ctx=ctx)
-result = interpreter.evaluate(interpreter.parse_code(code))
+interpreter.evaluate(interpreter.parse_code(code))
 # ['chrome', 'clearInterval', 'clearTimeout', 'closed', 'clientInformation', 'crypto', 'atob', 'btoa', 'isSecureContext',.........
 ```
 
@@ -77,7 +77,7 @@ console.log(ua);
 """
 
 interpreter = JSInterpreter(code, exec_ctx=ctx)
-result = interpreter.evaluate(interpreter.parse_code(code))
+interpreter.evaluate(interpreter.parse_code(code))
 # Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36
 ```
 
