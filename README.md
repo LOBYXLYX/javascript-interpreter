@@ -10,6 +10,7 @@ Fast
 
 # Examples: (in tests dir)
 - test
+![ex](https://github.com/LOBYXLYX/javascript-interpreter/blob/main/tests/example.png)
 ```python
 from interpreter import JSInterpreter
 from environment import init_globalEnv
